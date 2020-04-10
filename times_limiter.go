@@ -2,12 +2,11 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found at https://mit-license.org.
 
-package times_limiter
+package limiter
 
-type WaitTimeProvider interface {
-	// 根据(失败)次数获得等待时间
-	GetWaitTime(times int64) (duration int64)
-}
+import "time"
+
+var Now = time.Now
 
 type TimesLimiter struct {
 	store Storage
@@ -18,13 +17,33 @@ func NewTimesLimiter(wt WaitTimeProvider, storage Storage) *TimesLimiter {
 	return &TimesLimiter{wt: wt, store: storage}
 }
 
-func (ts *TimesLimiter) SetFailed(id string) (waitDuration int64, err error) {
-	var times int64
-	times, err = ts.store.Incr(id)
+func (ts *TimesLimiter) SetFailed(id string) (wait time.Duration, err error) {
+	var (
+		times    int64
+		expireAt *time.Time
+	)
+	times, expireAt, err = ts.store.Get(id)
 	if err != nil {
 		return 0, err
 	}
-	return ts.wt.GetWaitTime(times), nil
+	now := Now()
+	if expireAt != nil && expireAt.Before(now) {
+		err = ts.store.Del(id)
+		if err != nil {
+			return 0, err
+		}
+		times = 0
+	}
+	times++
+	wait = ts.wt.GetWaitTime(times)
+	if wait > 0 {
+		now = now.Add(wait)
+		expireAt = &now
+	} else {
+		expireAt = nil
+	}
+	err = ts.store.Set(id, times, expireAt)
+	return wait, err
 }
 
 func (ts *TimesLimiter) SetSuccess(id string) (err error) {
